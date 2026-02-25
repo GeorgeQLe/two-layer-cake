@@ -52,7 +52,8 @@ export class EventBus {
     this.structuredListeners.delete(handler);
   }
 
-  toAsyncIterable(): AsyncIterable<StructuredEvent> {
+  toAsyncIterable(options?: { maxQueueSize?: number }): AsyncIterable<StructuredEvent> {
+    const maxQueueSize = options?.maxQueueSize ?? Infinity;
     const queue: StructuredEvent[] = [];
     let resolve: ((value: IteratorResult<StructuredEvent>) => void) | null = null;
     let done = false;
@@ -63,6 +64,9 @@ export class EventBus {
         resolve = null;
         r({ value: event, done: false });
       } else {
+        if (queue.length >= maxQueueSize) {
+          queue.shift(); // drop oldest
+        }
         queue.push(event);
       }
     };

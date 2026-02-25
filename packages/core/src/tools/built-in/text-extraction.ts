@@ -35,7 +35,12 @@ function stripHtml(html: string): string {
 }
 
 function extractFromJson(content: string, selector?: string): string {
-  const parsed = JSON.parse(content) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch (e) {
+    return `[JSON parse error: ${e instanceof Error ? e.message : String(e)}]`;
+  }
 
   if (!selector) {
     return JSON.stringify(parsed, null, 2);

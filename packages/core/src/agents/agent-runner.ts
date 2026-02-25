@@ -7,6 +7,7 @@ import type {
   Plan,
   PermissionsConfig,
   ErrorDetail,
+  StreamChunk,
 } from '../types/index.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { ScopedToolRegistry } from '../tools/scoped-tool-registry.js';
@@ -122,21 +123,14 @@ export class AgentRunner {
 
 function createLogger(agentName: string) {
   return {
-    debug: (msg: string, ...args: unknown[]) =>
-      console.debug(`[${agentName}] ${msg}`, ...args),
-    info: (msg: string, ...args: unknown[]) =>
-      console.info(`[${agentName}] ${msg}`, ...args),
-    warn: (msg: string, ...args: unknown[]) =>
-      console.warn(`[${agentName}] ${msg}`, ...args),
-    error: (msg: string, ...args: unknown[]) =>
-      console.error(`[${agentName}] ${msg}`, ...args),
+    debug: (msg: string, ...args: unknown[]) => console.debug(`[${agentName}] ${msg}`, ...args),
+    info: (msg: string, ...args: unknown[]) => console.info(`[${agentName}] ${msg}`, ...args),
+    warn: (msg: string, ...args: unknown[]) => console.warn(`[${agentName}] ${msg}`, ...args),
+    error: (msg: string, ...args: unknown[]) => console.error(`[${agentName}] ${msg}`, ...args),
   };
 }
 
-function createBudgetTrackedLLM(
-  llm: LLMAdapter,
-  budget: TokenBudgetTracker,
-): LLMAdapter {
+function createBudgetTrackedLLM(llm: LLMAdapter, budget: TokenBudgetTracker): LLMAdapter {
   return {
     async complete(messages, options) {
       const result = await llm.complete(messages, options);
@@ -144,10 +138,48 @@ function createBudgetTrackedLLM(
       return result;
     },
     stream(messages, options) {
-      return llm.stream(messages, options);
+      const source = llm.stream(messages, options);
+      return {
+        [Symbol.asyncIterator]() {
+          const iterator = source[Symbol.asyncIterator]();
+          let totalOutputChars = 0;
+          let reportedUsage = false;
+
+          return {
+            async next() {
+              const result = await iterator.next();
+              if (!result.done) {
+                const chunk = result.value;
+                if (chunk.type === 'text') {
+                  totalOutputChars += chunk.content.length;
+                }
+                if (chunk.type === 'done' && chunk.tokensUsed) {
+                  budget.consume(chunk.tokensUsed.input + chunk.tokensUsed.output);
+                  reportedUsage = true;
+                }
+                if (chunk.type === 'done' && !reportedUsage) {
+                  const inputEstimate = messages.reduce((sum, m) => sum + m.content.length, 0) / 4;
+                  budget.consume(Math.ceil(inputEstimate + totalOutputChars / 4));
+                }
+              }
+              return result;
+            },
+            async return() {
+              return iterator.return
+                ? iterator.return()
+                : { value: undefined as unknown as StreamChunk, done: true as const };
+            },
+          };
+        },
+      } satisfies AsyncIterable<StreamChunk>;
     },
     async completeStructured(messages, schema, options) {
-      return llm.completeStructured(messages, schema, options);
+      const inputEstimate = await llm.countTokens(messages);
+      const result = await llm.completeStructured(messages, schema, options);
+      const outputStr = typeof result === 'string' ? result : JSON.stringify(result);
+      const outputEstimate = Math.ceil(outputStr.length / 4);
+      budget.consume(inputEstimate + outputEstimate);
+      return result;
     },
     async countTokens(messages) {
       return llm.countTokens(messages);

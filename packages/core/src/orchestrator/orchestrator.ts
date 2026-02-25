@@ -1,10 +1,8 @@
 import type {
   OrchestratorConfig,
   Plan,
-  SubtaskResult,
   AggregatedResult,
   StructuredEvent,
-  AgentDefinition,
   ToolDefinition,
 } from '../types/index.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -14,6 +12,8 @@ import { HookRunner } from '../hooks/hook-runner.js';
 import { TokenBudgetTracker } from '../llm/token-budget.js';
 import { InMemoryPlanStore } from '../state/in-memory-store.js';
 import { ErrorHandler } from '../errors/error-handler.js';
+import { OrchestratorConfigSchema } from '../types/config-schema.js';
+import { PlanValidationError } from '../errors/sdk-errors.js';
 import { Planner } from '../planner/planner.js';
 import { DAGExecutor } from '../executor/dag-executor.js';
 import { validateDAG } from '../executor/dag-validator.js';
@@ -36,6 +36,13 @@ export class Orchestrator {
   private readonly abortControllers = new Map<string, AbortController>();
 
   constructor(config: OrchestratorConfig) {
+    const parseResult = OrchestratorConfigSchema.safeParse(config);
+    if (!parseResult.success) {
+      throw new PlanValidationError(
+        parseResult.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
+      );
+    }
+
     this.config = config;
 
     // Event bus
@@ -72,6 +79,7 @@ export class Orchestrator {
     this.errorHandler = new ErrorHandler({
       hookRunner: this.hookRunner,
       llm: config.planner.llm,
+      eventBus: this.eventBus,
     });
 
     // Planner
@@ -130,7 +138,7 @@ export class Orchestrator {
         if (effectivePlan.depth >= maxDepth) {
           throw new Error(`Max plan depth (${maxDepth}) exceeded`);
         }
-        const childBudget = budgetTracker.fork();
+        const _childBudget = budgetTracker.fork();
         const subPlan = await this.planner.plan(
           subObjective,
           effectivePlan.id,
@@ -154,8 +162,7 @@ export class Orchestrator {
         permissions: this.config.permissions ?? {},
         maxConcurrency: this.config.maxConcurrency ?? 5,
         createSubPlan,
-        replan: async (p, r, trigger) =>
-          this.planner.replan(p, r, trigger, objective),
+        replan: async (p, r, trigger) => this.planner.replan(p, r, trigger, objective),
         signal: abortController.signal,
       });
 
@@ -188,9 +195,7 @@ export class Orchestrator {
       // Step 9: Emit completion
       const hasFailed = effectivePlan.subtasks.some((s) => s.status === 'FAILED');
       if (hasFailed) {
-        const failedSubtasks = effectivePlan.subtasks.filter(
-          (s) => s.status === 'FAILED',
-        );
+        const failedSubtasks = effectivePlan.subtasks.filter((s) => s.status === 'FAILED');
         this.eventBus.emit('plan:failed', effectivePlan, {
           code: 'PLAN_PARTIAL_FAILURE',
           message: `${failedSubtasks.length} subtask(s) failed`,
@@ -218,15 +223,21 @@ export class Orchestrator {
         original: error,
       };
 
-      this.eventBus.emit('plan:failed', { id: '', interpretation: '', subtasks: [], depth: 0 }, errorDetail);
+      this.eventBus.emit(
+        'plan:failed',
+        { id: '', interpretation: '', subtasks: [], depth: 0 },
+        errorDetail,
+      );
       throw error;
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
     }
   }
 
-  stream(objective: string): AsyncIterable<StructuredEvent> {
-    const iterable = this.eventBus.toAsyncIterable();
+  stream(objective: string, options?: { maxQueueSize?: number }): AsyncIterable<StructuredEvent> {
+    const iterable = this.eventBus.toAsyncIterable({
+      maxQueueSize: options?.maxQueueSize,
+    });
 
     // Start run in background
     this.run(objective).catch(() => {

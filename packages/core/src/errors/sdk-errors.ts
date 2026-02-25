@@ -7,7 +7,7 @@ export abstract class SDKError extends Error implements ErrorDetail {
   readonly original?: unknown;
 
   constructor(detail: ErrorDetail) {
-    super(detail.message);
+    super(detail.message, detail.original != null ? { cause: detail.original } : undefined);
     this.name = this.constructor.name;
     this.code = detail.code;
     this.retryable = detail.retryable;

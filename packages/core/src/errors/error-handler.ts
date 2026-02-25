@@ -1,29 +1,33 @@
-import type {
-  ErrorDetail,
-  ErrorStrategy,
-  LLMAdapter,
-  Plan,
-  Subtask,
-} from '../types/index.js';
+import type { ErrorDetail, ErrorStrategy, LLMAdapter, Plan, Subtask } from '../types/index.js';
 import type { HookRunner } from '../hooks/hook-runner.js';
+import type { EventBus } from '../observability/event-bus.js';
+import { z } from 'zod';
 import { retry } from './retry.js';
 
 export interface ErrorHandlerConfig {
   hookRunner: HookRunner;
   llm: LLMAdapter;
+  eventBus?: EventBus;
   maxRetries?: number;
   baseDelayMs?: number;
 }
 
+const LLMErrorStrategySchema = z.object({
+  strategy: z.enum(['retry', 'reassign', 'skip', 'fail']),
+  reason: z.string().optional(),
+});
+
 export class ErrorHandler {
   private readonly hookRunner: HookRunner;
   private readonly llm: LLMAdapter;
+  private readonly eventBus?: EventBus;
   private readonly maxRetries: number;
   private readonly baseDelayMs: number;
 
   constructor(config: ErrorHandlerConfig) {
     this.hookRunner = config.hookRunner;
     this.llm = config.llm;
+    this.eventBus = config.eventBus;
     this.maxRetries = config.maxRetries ?? 3;
     this.baseDelayMs = config.baseDelayMs ?? 1000;
   }
@@ -102,20 +106,37 @@ ${subtask ? `Subtask: ${subtask.id} - ${subtask.description} (agent: ${subtask.a
 
       const result = await this.llm.complete(messages);
 
+      let jsonContent: unknown;
       try {
-        const parsed = JSON.parse(result.content) as { strategy: string; reason: string };
-        const validStrategies = ['retry', 'reassign', 'skip', 'fail'];
-        if (validStrategies.includes(parsed.strategy)) {
+        jsonContent = JSON.parse(result.content);
+      } catch (parseError) {
+        this.eventBus?.emit('agent:progress', 'error-handler', {
+          type: 'llm_response_parse_failure',
+          rawContent: result.content,
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+        });
+        jsonContent = null;
+      }
+
+      if (jsonContent != null) {
+        const parsed = LLMErrorStrategySchema.safeParse(jsonContent);
+        if (parsed.success) {
           return {
-            strategy: parsed.strategy as ErrorStrategy['strategy'],
-            reason: parsed.reason,
+            strategy: parsed.data.strategy,
+            reason: parsed.data.reason,
           };
         }
-      } catch {
-        // Failed to parse LLM response
+        this.eventBus?.emit('agent:progress', 'error-handler', {
+          type: 'llm_response_schema_mismatch',
+          content: jsonContent,
+          zodErrors: parsed.error.issues,
+        });
       }
-    } catch {
-      // LLM escalation itself failed
+    } catch (llmError) {
+      this.eventBus?.emit('agent:progress', 'error-handler', {
+        type: 'llm_escalation_failed',
+        error: llmError instanceof Error ? llmError.message : String(llmError),
+      });
     }
 
     // Default: fail
