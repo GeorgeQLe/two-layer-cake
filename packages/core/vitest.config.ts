@@ -5,6 +5,7 @@ export default defineConfig({
     environment: 'node',
     include: ['test/**/*.test.ts'],
     coverage: {
+      provider: 'v8',
       thresholds: {
         statements: 80,
         branches: 80,

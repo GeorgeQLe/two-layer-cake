@@ -2,6 +2,28 @@
   "name": "@two-layer-cake/adapter-openai",
   "version": "0.1.0",
   "description": "OpenAI LLM adapter for two-layer-cake",
+  "license": "MIT",
+  "author": "George Le",
+  "homepage": "https://github.com/GeorgeQLe/two-layer-cake#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GeorgeQLe/two-layer-cake",
+    "directory": "packages/adapter-openai"
+  },
+  "bugs": {
+    "url": "https://github.com/GeorgeQLe/two-layer-cake/issues"
+  },
+  "keywords": [
+    "ai",
+    "openai",
+    "gpt",
+    "llm",
+    "adapter",
+    "two-layer-cake"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "sideEffects": false,
   "exports": {

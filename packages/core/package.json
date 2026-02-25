@@ -2,6 +2,30 @@
   "name": "two-layer-cake",
   "version": "0.1.0",
   "description": "TypeScript SDK for building multi-agent AI applications with hierarchical planning and execution",
+  "license": "MIT",
+  "author": "George Le",
+  "homepage": "https://github.com/GeorgeQLe/two-layer-cake#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GeorgeQLe/two-layer-cake",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/GeorgeQLe/two-layer-cake/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "multi-agent",
+    "orchestrator",
+    "llm",
+    "planner",
+    "dag",
+    "typescript"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "sideEffects": false,
   "exports": {

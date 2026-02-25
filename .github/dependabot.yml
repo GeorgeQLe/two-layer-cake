@@ -1,0 +1,57 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Etc/UTC
+    labels:
+      - dependencies
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: /packages/core
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Etc/UTC
+    labels:
+      - dependencies
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: /packages/adapter-claude
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Etc/UTC
+    labels:
+      - dependencies
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: /packages/adapter-openai
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Etc/UTC
+    labels:
+      - dependencies
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Etc/UTC
+    labels:
+      - dependencies
+    open-pull-requests-limit: 10
