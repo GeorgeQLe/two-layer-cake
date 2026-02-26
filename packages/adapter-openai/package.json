@@ -1,6 +1,6 @@
 {
   "name": "@two-layer-cake/adapter-openai",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "OpenAI LLM adapter for two-layer-cake",
   "license": "MIT",
   "author": "George Le",
