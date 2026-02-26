@@ -6,6 +6,7 @@ export {
   ToolAccessDeniedError,
   ToolConfirmationDeniedError,
   PlanValidationError,
+  LLMError,
 } from './sdk-errors.js';
 
 export { retry } from './retry.js';

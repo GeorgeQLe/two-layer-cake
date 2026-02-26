@@ -48,11 +48,7 @@ export { Orchestrator } from './orchestrator/index.js';
 export { defineAgent } from './agents/index.js';
 export { BaseAgent } from './agents/index.js';
 export { AgentRegistry } from './agents/index.js';
-export {
-  researcherAgent,
-  analyzerAgent,
-  answerGeneratorAgent,
-} from './agents/index.js';
+export { researcherAgent, analyzerAgent, answerGeneratorAgent } from './agents/index.js';
 
 // Tool system
 export { defineTool } from './tools/index.js';
@@ -70,7 +66,11 @@ export {
   ToolAccessDeniedError,
   ToolConfirmationDeniedError,
   PlanValidationError,
+  LLMError,
 } from './errors/index.js';
+
+export { retry } from './errors/index.js';
+export type { RetryOptions } from './errors/index.js';
 
 // State
 export { InMemoryPlanStore } from './state/index.js';

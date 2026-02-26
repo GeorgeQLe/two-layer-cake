@@ -3,14 +3,19 @@ export interface RetryOptions {
   baseDelayMs?: number;
   maxDelayMs?: number;
   signal?: AbortSignal;
+  shouldRetry?: (error: unknown) => boolean;
   onRetry?: (error: unknown, attempt: number) => void;
 }
 
-export async function retry<T>(
-  fn: () => Promise<T>,
-  options: RetryOptions,
-): Promise<T> {
-  const { maxRetries, baseDelayMs = 1000, maxDelayMs = 30000, signal, onRetry } = options;
+export async function retry<T>(fn: () => Promise<T>, options: RetryOptions): Promise<T> {
+  const {
+    maxRetries,
+    baseDelayMs = 1000,
+    maxDelayMs = 30000,
+    signal,
+    shouldRetry,
+    onRetry,
+  } = options;
 
   let lastError: unknown;
 
@@ -23,6 +28,10 @@ export async function retry<T>(
       return await fn();
     } catch (error) {
       lastError = error;
+
+      if (shouldRetry && !shouldRetry(error)) {
+        break;
+      }
 
       if (attempt === maxRetries) {
         break;

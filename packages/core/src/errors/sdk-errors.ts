@@ -115,3 +115,14 @@ export class PlanValidationError extends SDKError {
     this.details = details;
   }
 }
+
+export class LLMError extends SDKError {
+  readonly httpStatus?: number;
+  readonly provider: string;
+
+  constructor(detail: ErrorDetail & { httpStatus?: number; provider: string }) {
+    super({ ...detail, source: 'llm' });
+    this.httpStatus = detail.httpStatus;
+    this.provider = detail.provider;
+  }
+}

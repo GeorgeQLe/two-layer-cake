@@ -73,7 +73,7 @@ export class AgentRunner {
 
       const context: AgentContext = {
         tools: scopedTools,
-        llm: createBudgetTrackedLLM(llm, budgetTracker),
+        llm: createBudgetTrackedLLM(llm, budgetTracker, eventBus),
         abortSignal: abortController.signal,
         logger: createLogger(agent.name),
         emitEvent: (type: string, data: unknown) => {
@@ -130,11 +130,39 @@ function createLogger(agentName: string) {
   };
 }
 
-function createBudgetTrackedLLM(llm: LLMAdapter, budget: TokenBudgetTracker): LLMAdapter {
+function createBudgetTrackedLLM(
+  llm: LLMAdapter,
+  budget: TokenBudgetTracker,
+  eventBus: EventBus,
+): LLMAdapter {
+  let warned80 = false;
+  let warned95 = false;
+
+  function checkBudgetWarning(): void {
+    const pct = budget.percentage();
+    if (!warned80 && pct >= 80) {
+      warned80 = true;
+      eventBus.emit('budget:warning', {
+        used: budget.used(),
+        total: budget.used() + budget.remaining(),
+        percentage: pct,
+      });
+    }
+    if (!warned95 && pct >= 95) {
+      warned95 = true;
+      eventBus.emit('budget:warning', {
+        used: budget.used(),
+        total: budget.used() + budget.remaining(),
+        percentage: pct,
+      });
+    }
+  }
+
   return {
     async complete(messages, options) {
       const result = await llm.complete(messages, options);
       budget.consume(result.tokensUsed.input + result.tokensUsed.output);
+      checkBudgetWarning();
       return result;
     },
     stream(messages, options) {
@@ -161,6 +189,9 @@ function createBudgetTrackedLLM(llm: LLMAdapter, budget: TokenBudgetTracker): LL
                   const inputEstimate = messages.reduce((sum, m) => sum + m.content.length, 0) / 4;
                   budget.consume(Math.ceil(inputEstimate + totalOutputChars / 4));
                 }
+                if (chunk.type === 'done') {
+                  checkBudgetWarning();
+                }
               }
               return result;
             },
@@ -179,6 +210,7 @@ function createBudgetTrackedLLM(llm: LLMAdapter, budget: TokenBudgetTracker): LL
       const outputStr = typeof result === 'string' ? result : JSON.stringify(result);
       const outputEstimate = Math.ceil(outputStr.length / 4);
       budget.consume(inputEstimate + outputEstimate);
+      checkBudgetWarning();
       return result;
     },
     async countTokens(messages) {

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { z } from 'zod';
-import type { Message } from 'two-layer-cake';
+import type { Message, Logger, StreamChunk } from 'two-layer-cake';
+import { LLMError } from 'two-layer-cake';
 
 // ---------------------------------------------------------------------------
 // Mock the Anthropic SDK
@@ -10,15 +11,25 @@ const mockCreate = vi.fn();
 const mockStream = vi.fn();
 const mockCountTokens = vi.fn();
 
-vi.mock('@anthropic-ai/sdk', () => {
+// Import actual error classes before mocking
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const ActualAnthropic = ((await vi.importActual('@anthropic-ai/sdk')) as any).default;
+
+vi.mock('@anthropic-ai/sdk', async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actual = (await vi.importActual('@anthropic-ai/sdk')) as any;
+  class MockAnthropic {
+    messages = {
+      create: mockCreate,
+      stream: mockStream,
+      countTokens: mockCountTokens,
+    };
+  }
+  // Copy static error classes from the real SDK onto the mock
+  Object.assign(MockAnthropic, actual.default);
   return {
-    default: class MockAnthropic {
-      messages = {
-        create: mockCreate,
-        stream: mockStream,
-        countTokens: mockCountTokens,
-      };
-    },
+    ...actual,
+    default: MockAnthropic,
   };
 });
 
@@ -34,6 +45,25 @@ const testMessages: Message[] = [
   { role: 'user', content: 'Hello, world!' },
 ];
 
+function createMockLogger(): Logger & { calls: Record<string, unknown[][]> } {
+  const calls: Record<string, unknown[][]> = { debug: [], info: [], warn: [], error: [] };
+  return {
+    calls,
+    debug: (...args: unknown[]) => {
+      calls.debug.push(args);
+    },
+    info: (...args: unknown[]) => {
+      calls.info.push(args);
+    },
+    warn: (...args: unknown[]) => {
+      calls.warn.push(args);
+    },
+    error: (...args: unknown[]) => {
+      calls.error.push(args);
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -43,7 +73,11 @@ describe('ClaudeAdapter', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    adapter = new ClaudeAdapter({ model: 'claude-sonnet-4-20250514', apiKey: 'test-key' });
+    adapter = new ClaudeAdapter({
+      model: 'claude-sonnet-4-20250514',
+      apiKey: 'test-key',
+      retry: { maxRetries: 0 },
+    });
   });
 
   describe('complete()', () => {
@@ -63,6 +97,7 @@ describe('ClaudeAdapter', () => {
           system: 'You are a helpful assistant.',
           messages: [{ role: 'user', content: 'Hello, world!' }],
         }),
+        expect.any(Object),
       );
 
       expect(result).toEqual({
@@ -102,6 +137,7 @@ describe('ClaudeAdapter', () => {
           max_tokens: 100,
           stop_sequences: ['STOP'],
         }),
+        expect.any(Object),
       );
     });
 
@@ -136,7 +172,7 @@ describe('ClaudeAdapter', () => {
         finalMessage: mockFinalMessage,
       });
 
-      const chunks: import('two-layer-cake').StreamChunk[] = [];
+      const chunks: StreamChunk[] = [];
       for await (const chunk of adapter.stream(testMessages)) {
         chunks.push(chunk);
       }
@@ -167,7 +203,7 @@ describe('ClaudeAdapter', () => {
         finalMessage: mockFinalMessage,
       });
 
-      const chunks: import('two-layer-cake').StreamChunk[] = [];
+      const chunks: StreamChunk[] = [];
       for await (const chunk of adapter.stream(testMessages)) {
         chunks.push(chunk);
       }
@@ -218,6 +254,7 @@ describe('ClaudeAdapter', () => {
           ],
           tool_choice: { type: 'tool', name: 'structured_output' },
         }),
+        expect.any(Object),
       );
     });
 
@@ -230,9 +267,9 @@ describe('ClaudeAdapter', () => {
         stop_reason: 'end_turn',
       });
 
-      await expect(
-        adapter.completeStructured(testMessages, schema),
-      ).rejects.toThrow('Claude did not return a tool_use block');
+      await expect(adapter.completeStructured(testMessages, schema)).rejects.toThrow(
+        'Claude did not return a tool_use block',
+      );
     });
 
     it('should throw if tool_use input fails Zod validation', async () => {
@@ -254,9 +291,7 @@ describe('ClaudeAdapter', () => {
         stop_reason: 'tool_use',
       });
 
-      await expect(
-        adapter.completeStructured(testMessages, schema),
-      ).rejects.toThrow();
+      await expect(adapter.completeStructured(testMessages, schema)).rejects.toThrow();
     });
   });
 
@@ -294,6 +329,7 @@ describe('ClaudeAdapter', () => {
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({ max_tokens: 4096 }),
+        expect.any(Object),
       );
     });
 
@@ -301,6 +337,7 @@ describe('ClaudeAdapter', () => {
       const customAdapter = new ClaudeAdapter({
         model: 'claude-sonnet-4-20250514',
         maxTokens: 1024,
+        retry: { maxRetries: 0 },
       });
 
       mockCreate.mockResolvedValue({
@@ -313,7 +350,257 @@ describe('ClaudeAdapter', () => {
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({ max_tokens: 1024 }),
+        expect.any(Object),
       );
+    });
+  });
+
+  // =========================================================================
+  // Hardening tests
+  // =========================================================================
+
+  describe('error classification & retry', () => {
+    it('401 → throws LLMError with LLM_AUTH_ERROR, no retry', async () => {
+      const Anthropic = ActualAnthropic;
+      const authError = new Anthropic.AuthenticationError(
+        401,
+        { type: 'error', error: { type: 'authentication_error', message: 'bad key' } },
+        'bad key',
+        {},
+      );
+      mockCreate.mockRejectedValue(authError);
+
+      const retryAdapter = new ClaudeAdapter({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      try {
+        await retryAdapter.complete(testMessages);
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(LLMError);
+        const llmErr = err as InstanceType<typeof LLMError>;
+        expect(llmErr.code).toBe('LLM_AUTH_ERROR');
+        expect(llmErr.provider).toBe('anthropic');
+        expect(llmErr.httpStatus).toBe(401);
+      }
+      // Should only be called once (no retries for non-retryable errors)
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('429 → retries and succeeds on 2nd attempt', async () => {
+      const Anthropic = ActualAnthropic;
+      const rateLimitError = new Anthropic.RateLimitError(
+        429,
+        { type: 'error', error: { type: 'rate_limit_error', message: 'rate limited' } },
+        'rate limited',
+        {},
+      );
+
+      mockCreate.mockRejectedValueOnce(rateLimitError).mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 5, output_tokens: 1 },
+        stop_reason: 'end_turn',
+      });
+
+      const retryAdapter = new ClaudeAdapter({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      const result = await retryAdapter.complete(testMessages);
+      expect(result.content).toBe('ok');
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
+    it('500 → retries and succeeds on 2nd attempt', async () => {
+      const Anthropic = ActualAnthropic;
+      const serverError = new Anthropic.InternalServerError(
+        500,
+        { type: 'error', error: { type: 'api_error', message: 'internal error' } },
+        'internal error',
+        {},
+      );
+
+      mockCreate.mockRejectedValueOnce(serverError).mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'recovered' }],
+        usage: { input_tokens: 5, output_tokens: 1 },
+        stop_reason: 'end_turn',
+      });
+
+      const retryAdapter = new ClaudeAdapter({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      const result = await retryAdapter.complete(testMessages);
+      expect(result.content).toBe('recovered');
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
+    it('network error → retries', async () => {
+      const Anthropic = ActualAnthropic;
+      const connError = new Anthropic.APIConnectionError({ message: 'network failed' });
+
+      mockCreate.mockRejectedValueOnce(connError).mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'recovered' }],
+        usage: { input_tokens: 5, output_tokens: 1 },
+        stop_reason: 'end_turn',
+      });
+
+      const retryAdapter = new ClaudeAdapter({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      const result = await retryAdapter.complete(testMessages);
+      expect(result.content).toBe('recovered');
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
+    it('400 → throws immediately, no retry', async () => {
+      const Anthropic = ActualAnthropic;
+      const badReqError = new Anthropic.BadRequestError(
+        400,
+        { type: 'error', error: { type: 'invalid_request_error', message: 'bad' } },
+        'bad',
+        {},
+      );
+      mockCreate.mockRejectedValue(badReqError);
+
+      const retryAdapter = new ClaudeAdapter({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      await expect(retryAdapter.complete(testMessages)).rejects.toThrow(LLMError);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('exhausts retries → throws final error', async () => {
+      const Anthropic = ActualAnthropic;
+      const serverError = new Anthropic.InternalServerError(
+        500,
+        { type: 'error', error: { type: 'api_error', message: 'persistent failure' } },
+        'persistent failure',
+        {},
+      );
+      mockCreate.mockRejectedValue(serverError);
+
+      const retryAdapter = new ClaudeAdapter({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      await expect(retryAdapter.complete(testMessages)).rejects.toThrow();
+      // Initial + 2 retries = 3 calls
+      expect(mockCreate).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('AbortSignal', () => {
+    it('signal forwarded to SDK call', async () => {
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        stop_reason: 'end_turn',
+      });
+
+      const controller = new AbortController();
+      await adapter.complete(testMessages, { signal: controller.signal });
+
+      // The second argument to create should contain a signal
+      const callArgs = mockCreate.mock.calls[0];
+      expect(callArgs[1]).toBeDefined();
+      expect(callArgs[1].signal).toBeDefined();
+    });
+
+    it('user abort propagates', async () => {
+      const controller = new AbortController();
+      controller.abort(new Error('user cancelled'));
+
+      mockCreate.mockRejectedValue(new Error('aborted'));
+
+      // With an already-aborted signal, the request should fail
+      await expect(adapter.complete(testMessages, { signal: controller.signal })).rejects.toThrow();
+    });
+  });
+
+  describe('logging', () => {
+    it('debug messages logged on success', async () => {
+      const logger = createMockLogger();
+      const loggingAdapter = new ClaudeAdapter({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'test-key',
+        logger,
+        retry: { maxRetries: 0 },
+      });
+
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 5, output_tokens: 1 },
+        stop_reason: 'end_turn',
+      });
+
+      await loggingAdapter.complete(testMessages);
+
+      expect(logger.calls.debug.length).toBeGreaterThanOrEqual(2);
+      expect(logger.calls.debug[0][0]).toContain('complete() called');
+    });
+
+    it('warn messages logged on error', async () => {
+      const Anthropic = ActualAnthropic;
+      const logger = createMockLogger();
+      const loggingAdapter = new ClaudeAdapter({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'test-key',
+        logger,
+        retry: { maxRetries: 0 },
+      });
+
+      const authError = new Anthropic.AuthenticationError(
+        401,
+        { type: 'error', error: { type: 'authentication_error', message: 'bad key' } },
+        'bad key',
+        {},
+      );
+      mockCreate.mockRejectedValue(authError);
+
+      await expect(loggingAdapter.complete(testMessages)).rejects.toThrow();
+
+      expect(logger.calls.warn.length).toBeGreaterThanOrEqual(1);
+      expect(logger.calls.warn[0][0]).toContain('error');
+    });
+  });
+
+  describe('timeout', () => {
+    it('configured timeout passed to signal', async () => {
+      const timeoutAdapter = new ClaudeAdapter({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'test-key',
+        timeout: 5000,
+        retry: { maxRetries: 0 },
+      });
+
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        stop_reason: 'end_turn',
+      });
+
+      await timeoutAdapter.complete(testMessages);
+
+      // Verify signal was passed (created from timeout)
+      const callArgs = mockCreate.mock.calls[0];
+      expect(callArgs[1]).toBeDefined();
+      expect(callArgs[1].signal).toBeDefined();
     });
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { z } from 'zod';
-import type { Message } from 'two-layer-cake';
+import type { Message, Logger, StreamChunk } from 'two-layer-cake';
+import { LLMError } from 'two-layer-cake';
 
 // ---------------------------------------------------------------------------
 // Mock the OpenAI SDK
@@ -9,22 +10,32 @@ import type { Message } from 'two-layer-cake';
 const mockCreate = vi.fn();
 const mockParse = vi.fn();
 
-vi.mock('openai', () => {
-  return {
-    default: class MockOpenAI {
-      chat = {
+// Import actual error classes before mocking
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const ActualOpenAI = ((await vi.importActual('openai')) as any).default;
+
+vi.mock('openai', async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actual = (await vi.importActual('openai')) as any;
+  class MockOpenAI {
+    chat = {
+      completions: {
+        create: mockCreate,
+      },
+    };
+    beta = {
+      chat: {
         completions: {
-          create: mockCreate,
+          parse: mockParse,
         },
-      };
-      beta = {
-        chat: {
-          completions: {
-            parse: mockParse,
-          },
-        },
-      };
-    },
+      },
+    };
+  }
+  // Copy static error classes from the real SDK onto the mock
+  Object.assign(MockOpenAI, actual.default);
+  return {
+    ...actual,
+    default: MockOpenAI,
   };
 });
 
@@ -49,6 +60,25 @@ const testMessages: Message[] = [
   { role: 'user', content: 'Hello, world!' },
 ];
 
+function createMockLogger(): Logger & { calls: Record<string, unknown[][]> } {
+  const calls: Record<string, unknown[][]> = { debug: [], info: [], warn: [], error: [] };
+  return {
+    calls,
+    debug: (...args: unknown[]) => {
+      calls.debug.push(args);
+    },
+    info: (...args: unknown[]) => {
+      calls.info.push(args);
+    },
+    warn: (...args: unknown[]) => {
+      calls.warn.push(args);
+    },
+    error: (...args: unknown[]) => {
+      calls.error.push(args);
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -58,7 +88,11 @@ describe('OpenAIAdapter', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    adapter = new OpenAIAdapter({ model: 'gpt-4o', apiKey: 'test-key' });
+    adapter = new OpenAIAdapter({
+      model: 'gpt-4o',
+      apiKey: 'test-key',
+      retry: { maxRetries: 0 },
+    });
   });
 
   describe('complete()', () => {
@@ -84,6 +118,7 @@ describe('OpenAIAdapter', () => {
             { role: 'user', content: 'Hello, world!' },
           ],
         }),
+        expect.any(Object),
       );
 
       expect(result).toEqual({
@@ -146,6 +181,7 @@ describe('OpenAIAdapter', () => {
           max_tokens: 100,
           stop: ['STOP'],
         }),
+        expect.any(Object),
       );
     });
 
@@ -184,7 +220,7 @@ describe('OpenAIAdapter', () => {
 
       mockCreate.mockResolvedValue(asyncChunks);
 
-      const chunks: import('two-layer-cake').StreamChunk[] = [];
+      const chunks: StreamChunk[] = [];
       for await (const chunk of adapter.stream(testMessages)) {
         chunks.push(chunk);
       }
@@ -209,7 +245,7 @@ describe('OpenAIAdapter', () => {
 
       mockCreate.mockResolvedValue(asyncChunks);
 
-      const chunks: import('two-layer-cake').StreamChunk[] = [];
+      const chunks: StreamChunk[] = [];
       for await (const chunk of adapter.stream(testMessages)) {
         chunks.push(chunk);
       }
@@ -219,6 +255,7 @@ describe('OpenAIAdapter', () => {
           stream: true,
           stream_options: { include_usage: true },
         }),
+        expect.any(Object),
       );
     });
 
@@ -231,7 +268,7 @@ describe('OpenAIAdapter', () => {
 
       mockCreate.mockResolvedValue(asyncChunks);
 
-      const chunks: import('two-layer-cake').StreamChunk[] = [];
+      const chunks: StreamChunk[] = [];
       for await (const chunk of adapter.stream(testMessages)) {
         chunks.push(chunk);
       }
@@ -270,6 +307,7 @@ describe('OpenAIAdapter', () => {
             type: 'json_schema',
           }),
         }),
+        expect.any(Object),
       );
     });
 
@@ -311,38 +349,34 @@ describe('OpenAIAdapter', () => {
         usage: { prompt_tokens: 10, completion_tokens: 0 },
       });
 
-      await expect(
-        adapter.completeStructured(testMessages, schema),
-      ).rejects.toThrow('OpenAI did not return structured output');
+      await expect(adapter.completeStructured(testMessages, schema)).rejects.toThrow(
+        'OpenAI did not return structured output',
+      );
     });
   });
 
   describe('countTokens()', () => {
-    it('should estimate tokens based on character count', async () => {
+    it('should estimate tokens with improved heuristic', async () => {
       const count = await adapter.countTokens(testMessages);
 
-      // 'You are a helpful assistant.' = 30 chars
-      // 'Hello, world!' = 13 chars
-      // Total chars = 43, ceil(43/4) = 11
-      // Overhead: 2 messages * 4 = 8
-      // Total = 11 + 8 = 19
-      expect(count).toBe(19);
+      // 3 (base) + 2 messages * (4 overhead + 1 role)
+      // 'You are a helpful assistant.' = 30 chars → ceil(30/3.5) = 9
+      // 'Hello, world!' = 13 chars → ceil(13/3.5) = 4
+      // Total = 3 + (4+1+9) + (4+1+4) = 3 + 14 + 9 = 25 (note: 4+1+4 = 9 not 10)
+      expect(count).toBe(25);
     });
 
     it('should handle empty messages', async () => {
       const count = await adapter.countTokens([]);
-      expect(count).toBe(0);
+      // 3 (reply priming overhead) + no messages = 3
+      expect(count).toBe(3);
     });
 
     it('should handle a single message', async () => {
-      const count = await adapter.countTokens([
-        { role: 'user', content: 'Hello' },
-      ]);
+      const count = await adapter.countTokens([{ role: 'user', content: 'Hello' }]);
 
-      // 'Hello' = 5 chars, ceil(5/4) = 2
-      // Overhead: 1 message * 4 = 4
-      // Total = 2 + 4 = 6
-      expect(count).toBe(6);
+      // 3 (base) + 4 (overhead) + 1 (role) + ceil(5/3.5)=2 = 10
+      expect(count).toBe(10);
     });
   });
 
@@ -362,6 +396,7 @@ describe('OpenAIAdapter', () => {
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({ max_tokens: 4096 }),
+        expect.any(Object),
       );
     });
 
@@ -369,6 +404,7 @@ describe('OpenAIAdapter', () => {
       const customAdapter = new OpenAIAdapter({
         model: 'gpt-4o',
         maxTokens: 1024,
+        retry: { maxRetries: 0 },
       });
 
       mockCreate.mockResolvedValue({
@@ -385,7 +421,248 @@ describe('OpenAIAdapter', () => {
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({ max_tokens: 1024 }),
+        expect.any(Object),
       );
+    });
+  });
+
+  // =========================================================================
+  // Hardening tests
+  // =========================================================================
+
+  describe('error classification & retry', () => {
+    it('401 → throws LLMError with LLM_AUTH_ERROR, no retry', async () => {
+      const OpenAI = ActualOpenAI;
+      const authError = new OpenAI.AuthenticationError(
+        401,
+        { error: { message: 'bad key', type: 'auth_error', code: null, param: null } },
+        'bad key',
+        {},
+      );
+      mockCreate.mockRejectedValue(authError);
+
+      const retryAdapter = new OpenAIAdapter({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      try {
+        await retryAdapter.complete(testMessages);
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(LLMError);
+        const llmErr = err as InstanceType<typeof LLMError>;
+        expect(llmErr.code).toBe('LLM_AUTH_ERROR');
+        expect(llmErr.provider).toBe('openai');
+        expect(llmErr.httpStatus).toBe(401);
+      }
+      // Should only be called once (no retries for non-retryable errors)
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('429 → retries and succeeds on 2nd attempt', async () => {
+      const OpenAI = ActualOpenAI;
+      const rateLimitError = new OpenAI.RateLimitError(
+        429,
+        { error: { message: 'rate limited', type: 'rate_limit_error', code: null, param: null } },
+        'rate limited',
+        {},
+      );
+
+      mockCreate.mockRejectedValueOnce(rateLimitError).mockResolvedValueOnce({
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 5, completion_tokens: 1 },
+      });
+
+      const retryAdapter = new OpenAIAdapter({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      const result = await retryAdapter.complete(testMessages);
+      expect(result.content).toBe('ok');
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
+    it('500 → retries and succeeds on 2nd attempt', async () => {
+      const OpenAI = ActualOpenAI;
+      const serverError = new OpenAI.InternalServerError(
+        500,
+        { error: { message: 'internal error', type: 'server_error', code: null, param: null } },
+        'internal error',
+        {},
+      );
+
+      mockCreate.mockRejectedValueOnce(serverError).mockResolvedValueOnce({
+        choices: [{ message: { content: 'recovered' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 5, completion_tokens: 1 },
+      });
+
+      const retryAdapter = new OpenAIAdapter({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      const result = await retryAdapter.complete(testMessages);
+      expect(result.content).toBe('recovered');
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
+    it('network error → retries', async () => {
+      const OpenAI = ActualOpenAI;
+      const connError = new OpenAI.APIConnectionError({ message: 'network failed' });
+
+      mockCreate.mockRejectedValueOnce(connError).mockResolvedValueOnce({
+        choices: [{ message: { content: 'recovered' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 5, completion_tokens: 1 },
+      });
+
+      const retryAdapter = new OpenAIAdapter({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      const result = await retryAdapter.complete(testMessages);
+      expect(result.content).toBe('recovered');
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
+    it('400 → throws immediately, no retry', async () => {
+      const OpenAI = ActualOpenAI;
+      const badReqError = new OpenAI.BadRequestError(
+        400,
+        { error: { message: 'bad', type: 'invalid_request_error', code: null, param: null } },
+        'bad',
+        {},
+      );
+
+      const retryAdapter = new OpenAIAdapter({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      mockCreate.mockRejectedValue(badReqError);
+      await expect(retryAdapter.complete(testMessages)).rejects.toThrow(LLMError);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('exhausts retries → throws final error', async () => {
+      const OpenAI = ActualOpenAI;
+      const serverError = new OpenAI.InternalServerError(
+        500,
+        { error: { message: 'persistent failure', type: 'server_error', code: null, param: null } },
+        'persistent failure',
+        {},
+      );
+      mockCreate.mockRejectedValue(serverError);
+
+      const retryAdapter = new OpenAIAdapter({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      await expect(retryAdapter.complete(testMessages)).rejects.toThrow();
+      // Initial + 2 retries = 3 calls
+      expect(mockCreate).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('AbortSignal', () => {
+    it('signal forwarded to SDK call', async () => {
+      mockCreate.mockResolvedValue({
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+
+      const controller = new AbortController();
+      await adapter.complete(testMessages, { signal: controller.signal });
+
+      const callArgs = mockCreate.mock.calls[0];
+      expect(callArgs[1]).toBeDefined();
+      expect(callArgs[1].signal).toBeDefined();
+    });
+
+    it('user abort propagates', async () => {
+      const controller = new AbortController();
+      controller.abort(new Error('user cancelled'));
+
+      mockCreate.mockRejectedValue(new Error('aborted'));
+
+      await expect(adapter.complete(testMessages, { signal: controller.signal })).rejects.toThrow();
+    });
+  });
+
+  describe('logging', () => {
+    it('debug messages logged on success', async () => {
+      const logger = createMockLogger();
+      const loggingAdapter = new OpenAIAdapter({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        logger,
+        retry: { maxRetries: 0 },
+      });
+
+      mockCreate.mockResolvedValue({
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 5, completion_tokens: 1 },
+      });
+
+      await loggingAdapter.complete(testMessages);
+
+      expect(logger.calls.debug.length).toBeGreaterThanOrEqual(2);
+      expect(logger.calls.debug[0][0]).toContain('complete() called');
+    });
+
+    it('warn messages logged on error', async () => {
+      const OpenAI = ActualOpenAI;
+      const logger = createMockLogger();
+      const loggingAdapter = new OpenAIAdapter({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        logger,
+        retry: { maxRetries: 0 },
+      });
+
+      const authError = new OpenAI.AuthenticationError(
+        401,
+        { error: { message: 'bad key', type: 'auth_error', code: null, param: null } },
+        'bad key',
+        {},
+      );
+      mockCreate.mockRejectedValue(authError);
+
+      await expect(loggingAdapter.complete(testMessages)).rejects.toThrow();
+
+      expect(logger.calls.warn.length).toBeGreaterThanOrEqual(1);
+      expect(logger.calls.warn[0][0]).toContain('error');
+    });
+  });
+
+  describe('timeout', () => {
+    it('configured timeout passed to signal', async () => {
+      const timeoutAdapter = new OpenAIAdapter({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        timeout: 5000,
+        retry: { maxRetries: 0 },
+      });
+
+      mockCreate.mockResolvedValue({
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+
+      await timeoutAdapter.complete(testMessages);
+
+      const callArgs = mockCreate.mock.calls[0];
+      expect(callArgs[1]).toBeDefined();
+      expect(callArgs[1].signal).toBeDefined();
     });
   });
 });

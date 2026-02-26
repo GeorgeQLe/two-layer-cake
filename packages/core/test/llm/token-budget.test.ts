@@ -64,6 +64,44 @@ describe('TokenBudgetTracker', () => {
     }
   });
 
+  describe('percentage()', () => {
+    it('returns 0 when no tokens consumed', () => {
+      const tracker = new TokenBudgetTracker(1000);
+      expect(tracker.percentage()).toBe(0);
+    });
+
+    it('returns correct percentage after consumption', () => {
+      const tracker = new TokenBudgetTracker(1000);
+      tracker.consume(800);
+      expect(tracker.percentage()).toBe(80);
+    });
+
+    it('returns 50% when half consumed', () => {
+      const tracker = new TokenBudgetTracker(200);
+      tracker.consume(100);
+      expect(tracker.percentage()).toBe(50);
+    });
+
+    it('returns 0 when budget is 0', () => {
+      const tracker = new TokenBudgetTracker(0);
+      expect(tracker.percentage()).toBe(0);
+    });
+
+    it('accounts for parent budget constraints', () => {
+      const parent = new TokenBudgetTracker(100);
+      parent.consume(80);
+      const child = parent.fork(50);
+      // Child has 50 budget but parent only has 20 remaining
+      // effectiveBudget = min(50, 20 + 0) = 20
+      // percentage = 0/20 * 100 = 0
+      expect(child.percentage()).toBe(0);
+
+      child.consume(10);
+      // consumed = 10, effectiveBudget = min(50, 10 + 10) = 20
+      expect(child.percentage()).toBe(50);
+    });
+  });
+
   describe('fork', () => {
     it('creates a child tracker that shares parent budget', () => {
       const parent = new TokenBudgetTracker(1000);

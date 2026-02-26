@@ -39,6 +39,12 @@ export class TokenBudgetTracker {
     return this.consumed;
   }
 
+  percentage(): number {
+    const budget = this.effectiveBudget();
+    if (budget <= 0) return 0;
+    return (this.consumed / budget) * 100;
+  }
+
   fork(childBudget?: number): TokenBudgetTracker {
     const budget = childBudget ?? this.remaining();
     return new TokenBudgetTracker(budget, this);
