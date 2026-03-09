@@ -17,7 +17,7 @@
     "prepare": "husky"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.27.0",
+    "@changesets/cli": "^2.30.0",
     "@vitest/coverage-v8": "^3.0.0",
     "eslint": "^9.0.0",
     "husky": "^9.1.7",
