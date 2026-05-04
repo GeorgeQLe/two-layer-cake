@@ -82,7 +82,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "zod": "^3.23.0"
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@opentelemetry/api": "^1.0.0",
