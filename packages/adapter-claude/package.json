@@ -50,7 +50,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0"
+    "@anthropic-ai/sdk": "^0.92.0"
   },
   "peerDependencies": {
     "two-layer-cake": "workspace:*"
