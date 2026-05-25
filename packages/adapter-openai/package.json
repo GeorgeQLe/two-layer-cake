@@ -58,7 +58,7 @@
   "devDependencies": {
     "tsup": "^8.3.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
+    "vitest": "^4.1.7",
     "zod": "^3.23.0",
     "two-layer-cake": "workspace:*"
   }
